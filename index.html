@@ -18,29 +18,26 @@
   .card { background:var(--card); padding:24px; border-radius:16px; width:100%; max-width:380px; box-shadow:0 4px 20px rgba(0,0,0,.1); }
   h1 { margin:0 0 4px; font-size:22px; }
   p.sub { margin:0 0 16px; color:var(--muted); font-size:14px; }
+  .tabs { display:flex; gap:6px; margin-bottom:16px; background:var(--bg); padding:4px; border-radius:12px; }
+  .tabs button { flex:1; background:none; color:var(--muted); padding:10px; font-size:15px; }
+  .tabs button.on { background:var(--accent); color:#fff; }
   input { width:100%; padding:12px; margin-bottom:12px; border:1px solid var(--other); border-radius:10px; font-size:16px; background:var(--bg); color:var(--text); }
   button { padding:12px 16px; border:0; border-radius:10px; background:var(--accent); color:#fff; font-size:16px; cursor:pointer; }
   button.full { width:100%; }
-  button.link { background:none; color:var(--accent); padding:0 0 12px; font-size:14px; }
   #err { color:#dc2626; font-size:14px; min-height:20px; margin-top:8px; }
   #chat { flex-direction:column; }
   header { padding:12px 16px; background:var(--card); display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--other); gap:8px; }
-  header b { font-size:16px; }
+  header b { font-size:16px; user-select:all; }
   header small { display:block; color:var(--muted); font-size:12px; }
   header .btns { display:flex; gap:8px; }
   header button { padding:8px 12px; font-size:14px; }
+  #copyBtn { background:var(--other); color:var(--text); }
   #leaveBtn { background:#dc2626; }
-  #membersBtn { background:var(--other); color:var(--text); }
-  #members { display:none; background:var(--card); border-bottom:1px solid var(--other); padding:8px 16px; max-height:35%; overflow-y:auto; }
-  #members.open { display:block; }
-  .mem { display:flex; justify-content:space-between; align-items:center; padding:6px 0; font-size:15px; }
-  .mem small { color:var(--muted); }
-  .mem button { padding:4px 10px; font-size:13px; background:#dc2626; }
   #msgs { flex:1; overflow-y:auto; padding:12px; display:flex; flex-direction:column; gap:8px; }
   .m { max-width:80%; padding:8px 12px; border-radius:14px; background:var(--other); word-wrap:break-word; white-space:pre-wrap; }
   .m .n { font-size:12px; color:var(--muted); margin-bottom:2px; }
   .m.me { align-self:flex-end; background:var(--me); color:var(--me-text); }
-  .m.sys { align-self:center; background:none; color:var(--muted); font-size:13px; }
+  .m.sys { align-self:center; background:none; color:var(--muted); font-size:13px; text-align:center; }
   form { display:flex; gap:8px; padding:10px; background:var(--card); border-top:1px solid var(--other); padding-bottom:calc(10px + env(safe-area-inset-bottom, 0px)); }
   form input { margin:0; flex:1; }
 </style>
@@ -50,12 +47,15 @@
 <div id="login" class="screen active">
   <div class="card">
     <h1>💬 Chat Ruangan</h1>
-    <p class="sub">Isi nama dan kode ruangan. Kalau kamu orang pertama, kamu jadi host dan password yang kamu isi dipakai untuk ruangan ini.</p>
+    <p class="sub">Pesan dienkripsi dengan password ruangan.</p>
+    <div class="tabs">
+      <button id="tabCreate" class="on" type="button">Buat Ruangan</button>
+      <button id="tabJoin" type="button">Masuk Ruangan</button>
+    </div>
     <input id="name" placeholder="Nama kamu" maxlength="20" autocomplete="off">
-    <input id="code" placeholder="Kode ruangan" maxlength="20" autocomplete="off">
-    <button class="link" id="randBtn" type="button">Buat kode acak</button>
+    <input id="code" placeholder="Kode ruangan" maxlength="20" autocomplete="off" style="display:none">
     <input id="pass" type="password" placeholder="Password ruangan" maxlength="30" autocomplete="off">
-    <button class="full" id="joinBtn">Masuk</button>
+    <button class="full" id="goBtn">Buat Ruangan</button>
     <div id="err"></div>
   </div>
 </div>
@@ -64,31 +64,60 @@
   <header>
     <div><b id="roomTitle"></b><small id="status"></small></div>
     <div class="btns">
-      <button id="membersBtn">👥 <span id="count">1</span></button>
+      <button id="copyBtn">Salin kode</button>
       <button id="leaveBtn">Keluar</button>
     </div>
   </header>
-  <div id="members"></div>
   <div id="msgs"></div>
   <form id="form">
-    <input id="text" placeholder="Ketik pesan..." autocomplete="off">
+    <input id="text" placeholder="Ketik pesan..." maxlength="500" autocomplete="off">
     <button type="submit">Kirim</button>
   </form>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
 <script>
 const $ = id => document.getElementById(id);
-const MAX = 10;
-let peer = null, isHost = false, inChat = false, kickedFlag = false;
-let myName = '', roomCode = '', roomPass = '', hostConn = null, timer = null;
-let clients = [];
-let banned = new Set();
+const SERVER = 'https://ntfy.sh/';
+const enc = new TextEncoder(), dec = new TextDecoder();
+const myId = Math.random().toString(36).slice(2, 10);
+
+let mode = 'create';
+let myName = '', roomCode = '', key = null, topic = '', es = null;
+let seen = new Set(), announced = false, bad = 0, goodOthers = 0, warned = false;
+
+function b64(buf) { let s = ''; new Uint8Array(buf).forEach(b => s += String.fromCharCode(b)); return btoa(s); }
+function unb64(str) { return Uint8Array.from(atob(str), c => c.charCodeAt(0)); }
+
+async function sha256hex(s) {
+  const h = await crypto.subtle.digest('SHA-256', enc.encode(s));
+  return Array.from(new Uint8Array(h)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+async function deriveKey(code, pass) {
+  const base = await crypto.subtle.importKey('raw', enc.encode(code + '|' + pass), 'PBKDF2', false, ['deriveKey']);
+  return crypto.subtle.deriveKey(
+    { name: 'PBKDF2', salt: enc.encode('chat-online-v3'), iterations: 100000, hash: 'SHA-256' },
+    base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+}
+async function encrypt(obj) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, enc.encode(JSON.stringify(obj)));
+  const out = new Uint8Array(12 + ct.byteLength);
+  out.set(iv); out.set(new Uint8Array(ct), 12);
+  return b64(out);
+}
+async function decrypt(str) {
+  try {
+    const raw = unb64(str);
+    const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: raw.slice(0, 12) }, key, raw.slice(12));
+    return JSON.parse(dec.decode(pt));
+  } catch (e) { return null; }
+}
 
 function show(id) {
   document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
   $(id).classList.add('active');
 }
+function setStatus(t) { $('status').textContent = t; }
 
 function addMsg(m) {
   const d = document.createElement('div');
@@ -111,208 +140,122 @@ function addMsg(m) {
   $('msgs').scrollTop = $('msgs').scrollHeight;
 }
 
-function memberNames() {
-  return [myName].concat(clients.filter(c => c.name).map(c => c.name));
+async function send(obj) {
+  const body = await encrypt(obj);
+  const r = await fetch(SERVER + topic, { method: 'POST', body });
+  if (!r.ok) throw new Error('HTTP ' + r.status);
 }
+function newMid() { return myId + Math.random().toString(36).slice(2, 8) + Date.now().toString(36); }
 
-function relay(data, exceptConn) {
-  clients.forEach(c => {
-    if (c.name && c.conn !== exceptConn && c.conn.open) c.conn.send(data);
-  });
-}
-
-function renderMembers(list) {
-  $('count').textContent = list.length;
-  const box = $('members');
-  box.innerHTML = '';
-  list.forEach((name, i) => {
-    const row = document.createElement('div');
-    row.className = 'mem';
-    const label = document.createElement('span');
-    label.textContent = name;
-    if (i === 0) {
-      const s = document.createElement('small');
-      s.textContent = ' (host)';
-      label.appendChild(s);
+function connect() {
+  es = new EventSource(SERVER + topic + '/sse?since=all');
+  es.onopen = () => {
+    setStatus('Terhubung');
+    if (!announced) {
+      announced = true;
+      const mid = newMid();
+      seen.add(mid);
+      send({ mid, sid: myId, type: 'sys', text: myName + ' bergabung' }).catch(() => {});
+      setTimeout(() => {
+        if (bad > 0 && goodOthers === 0 && !warned) {
+          warned = true;
+          addMsg({ type: 'sys', text: 'Ada pesan yang tidak bisa dibuka. Password atau kode mungkin salah.' });
+        }
+      }, 6000);
     }
-    row.appendChild(label);
-    if (isHost && i !== 0) {
-      const b = document.createElement('button');
-      b.textContent = 'Keluarkan';
-      b.onclick = () => kick(name);
-      row.appendChild(b);
-    }
-    box.appendChild(row);
-  });
+  };
+  es.onerror = () => setStatus('Menyambung ulang...');
+  es.onmessage = async ev => {
+    let d;
+    try { d = JSON.parse(ev.data); } catch (e) { return; }
+    if (d.event !== 'message' || !d.message) return;
+    const m = await decrypt(d.message);
+    if (!m || !m.mid) { bad++; return; }
+    if (seen.has(m.mid)) return;
+    seen.add(m.mid);
+    if (m.sid !== myId) goodOthers++;
+    if (m.type === 'sys') addMsg({ type: 'sys', text: m.text });
+    else addMsg({ type: 'msg', name: m.name, text: m.text, me: m.sid === myId });
+  };
 }
 
-function broadcastMembers() {
-  const list = memberNames();
-  renderMembers(list);
-  relay({ type: 'members', list });
+function setMode(m) {
+  mode = m;
+  $('tabCreate').classList.toggle('on', m === 'create');
+  $('tabJoin').classList.toggle('on', m === 'join');
+  $('code').style.display = m === 'join' ? 'block' : 'none';
+  $('goBtn').textContent = m === 'create' ? 'Buat Ruangan' : 'Masuk Ruangan';
+  $('err').textContent = '';
 }
 
-function enterChat() {
-  clearTimeout(timer);
-  inChat = true;
-  $('roomTitle').textContent = 'Ruangan: ' + roomCode;
-  $('msgs').innerHTML = '';
-  $('members').classList.remove('open');
-  show('chat');
-}
-
-function kick(name) {
-  const c = clients.find(x => x.name === name);
-  if (!c) return;
-  banned.add(name.toLowerCase());
-  c.kicked = true;
-  c.conn.send({ type: 'kicked' });
-  setTimeout(() => c.conn.close(), 300);
-  clients = clients.filter(x => x !== c);
-  const s = { type: 'sys', text: name + ' dikeluarkan' };
-  addMsg(s); relay(s); broadcastMembers();
-}
-
-function startHost() {
-  isHost = true;
-  $('status').textContent = 'Kamu host ruangan ini';
-  enterChat();
-  renderMembers([myName]);
-  addMsg({ type: 'sys', text: 'Ruangan dibuat. Bagikan kode "' + roomCode + '"' + (roomPass ? ' dan passwordnya' : '') + ' ke temanmu.' });
-
-  peer.on('connection', conn => {
-    const c = { conn, name: null, kicked: false };
-    clients.push(c);
-    const t = setTimeout(() => { if (!c.name) conn.close(); }, 10000);
-
-    conn.on('data', d => {
-      if (!d || typeof d !== 'object') return;
-      if (!c.name) {
-        if (d.type !== 'join') return;
-        const nm = String(d.name || '').trim().slice(0, 20);
-        const deny = r => {
-          conn.send({ type: 'denied', reason: r });
-          setTimeout(() => conn.close(), 300);
-        };
-        if (!nm) return deny('Nama kosong.');
-        if (roomPass && d.pass !== roomPass) return deny('Password salah.');
-        if (banned.has(nm.toLowerCase())) return deny('Kamu dikeluarkan dari ruangan ini.');
-        if (memberNames().some(n => n.toLowerCase() === nm.toLowerCase())) return deny('Nama sudah dipakai.');
-        if (memberNames().length >= MAX) return deny('Ruangan penuh.');
-        c.name = nm;
-        clearTimeout(t);
-        conn.send({ type: 'welcome', list: memberNames() });
-        const s = { type: 'sys', text: nm + ' bergabung' };
-        addMsg(s); relay(s, conn); broadcastMembers();
-        return;
-      }
-      if (d.type === 'msg') {
-        const m = { type: 'msg', name: c.name, text: String(d.text || '').slice(0, 1000) };
-        addMsg(m); relay(m, conn);
-      }
-    });
-
-    conn.on('close', () => {
-      clearTimeout(t);
-      clients = clients.filter(x => x !== c);
-      if (c.name && !c.kicked) {
-        const s = { type: 'sys', text: c.name + ' keluar' };
-        addMsg(s); relay(s); broadcastMembers();
-      }
-    });
-  });
-}
-
-function startClient(hostId) {
-  peer.destroy();
-  peer = new Peer();
-  peer.on('error', e => {
-    fail(e.type === 'peer-unavailable' ? 'Ruangan tidak ditemukan.' : 'Gagal terhubung: ' + e.type);
-  });
-  peer.on('open', () => {
-    hostConn = peer.connect(hostId, { reliable: true });
-    hostConn.on('open', () => {
-      hostConn.send({ type: 'join', name: myName, pass: $('pass').value });
-    });
-    hostConn.on('data', d => {
-      if (!d || typeof d !== 'object') return;
-      if (d.type === 'denied') {
-        fail(d.reason);
-      } else if (d.type === 'welcome') {
-        $('status').textContent = 'Terhubung';
-        enterChat();
-        renderMembers(d.list);
-      } else if (d.type === 'members') {
-        renderMembers(d.list);
-      } else if (d.type === 'kicked') {
-        kickedFlag = true;
-        $('status').textContent = 'Dikeluarkan';
-        addMsg({ type: 'sys', text: 'Kamu dikeluarkan oleh host.' });
-      } else {
-        addMsg(d);
-      }
-    });
-    hostConn.on('close', () => {
-      if (inChat && !kickedFlag) {
-        addMsg({ type: 'sys', text: 'Host terputus. Ruangan ditutup.' });
-        $('status').textContent = 'Terputus';
-      }
-    });
-  });
-}
-
-function fail(msg) {
-  clearTimeout(timer);
-  if (peer) { peer.destroy(); peer = null; }
-  inChat = false;
-  $('err').textContent = msg;
-  show('login');
-}
-
-function join() {
-  myName = $('name').value.trim();
-  roomCode = $('code').value.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
-  roomPass = $('pass').value;
-  if (!myName || !roomCode) { $('err').textContent = 'Isi nama dan kode ruangan.'; return; }
+async function go() {
+  const name = $('name').value.trim();
+  const pass = $('pass').value;
+  let code;
+  if (!name) { $('err').textContent = 'Isi nama kamu.'; return; }
+  if (mode === 'create') {
+    if (pass.length < 4) { $('err').textContent = 'Password minimal 4 karakter.'; return; }
+    const chars = 'abcdefghjkmnpqrstuvwxyz23456789';
+    const arr = crypto.getRandomValues(new Uint8Array(10));
+    code = Array.from(arr).map(n => chars[n % chars.length]).join('');
+  } else {
+    code = $('code').value.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (!code) { $('err').textContent = 'Isi kode ruangan.'; return; }
+    if (!pass) { $('err').textContent = 'Isi password ruangan.'; return; }
+  }
   $('err').textContent = 'Menghubungkan...';
-  kickedFlag = false; isHost = false; clients = []; banned = new Set();
-  clearTimeout(timer);
-  timer = setTimeout(() => fail('Koneksi terlalu lama. Coba ganti jaringan atau muat ulang halaman.'), 25000);
-  const hostId = 'roomchat-v2-' + roomCode;
-  peer = new Peer(hostId);
-  peer.on('open', () => startHost());
-  peer.on('error', e => {
-    if (e.type === 'unavailable-id') startClient(hostId);
-    else fail('Error: ' + e.type);
-  });
+  $('goBtn').disabled = true;
+  try {
+    myName = name; roomCode = code;
+    key = await deriveKey(code, pass);
+    topic = 'chatonline-' + (await sha256hex(code)).slice(0, 24);
+    seen = new Set(); announced = false; bad = 0; goodOthers = 0; warned = false;
+    $('msgs').innerHTML = '';
+    $('roomTitle').textContent = 'Kode: ' + code;
+    setStatus('Menghubungkan...');
+    show('chat');
+    if (mode === 'create') {
+      addMsg({ type: 'sys', text: 'Ruangan dibuat. Bagikan kode "' + code + '" dan passwordnya ke temanmu lewat chat pribadi.' });
+    }
+    connect();
+  } catch (e) {
+    $('err').textContent = 'Gagal: ' + e.message;
+    show('login');
+  }
+  $('goBtn').disabled = false;
 }
 
 function leave() {
-  clearTimeout(timer);
-  if (peer) peer.destroy();
-  peer = null; clients = []; hostConn = null; isHost = false; inChat = false;
+  if (es) { es.close(); es = null; }
+  if (key && announced) {
+    const mid = newMid();
+    send({ mid, sid: myId, type: 'sys', text: myName + ' keluar' }).catch(() => {});
+  }
+  key = null;
   show('login');
   $('err').textContent = '';
 }
 
-$('randBtn').onclick = () => {
-  const chars = 'abcdefghjkmnpqrstuvwxyz23456789';
-  let s = '';
-  for (let i = 0; i < 10; i++) s += chars[Math.floor(Math.random() * chars.length)];
-  $('code').value = s;
-};
-$('joinBtn').onclick = join;
-$('pass').addEventListener('keydown', e => { if (e.key === 'Enter') join(); });
+$('tabCreate').onclick = () => setMode('create');
+$('tabJoin').onclick = () => setMode('join');
+$('goBtn').onclick = go;
+$('pass').addEventListener('keydown', e => { if (e.key === 'Enter') go(); });
 $('leaveBtn').onclick = leave;
-$('membersBtn').onclick = () => $('members').classList.toggle('open');
-$('form').addEventListener('submit', e => {
+$('copyBtn').onclick = async () => {
+  try { await navigator.clipboard.writeText(roomCode); $('copyBtn').textContent = 'Tersalin ✓'; }
+  catch (e) { $('copyBtn').textContent = 'Tekan lama kode'; }
+  setTimeout(() => $('copyBtn').textContent = 'Salin kode', 2000);
+};
+$('form').addEventListener('submit', async e => {
   e.preventDefault();
   const text = $('text').value.trim();
-  if (!text || kickedFlag) return;
-  addMsg({ type: 'msg', name: myName, text, me: true });
-  if (isHost) relay({ type: 'msg', name: myName, text });
-  else if (hostConn && hostConn.open) hostConn.send({ type: 'msg', text });
+  if (!text || !key) return;
   $('text').value = '';
+  const mid = newMid();
+  seen.add(mid);
+  addMsg({ type: 'msg', name: myName, text, me: true });
+  try { await send({ mid, sid: myId, type: 'msg', name: myName, text }); }
+  catch (err) { addMsg({ type: 'sys', text: 'Pesan gagal terkirim. Coba lagi.' }); }
 });
 </script>
 </body>
