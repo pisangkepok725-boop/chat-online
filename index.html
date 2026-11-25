@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chat Ruangan</title>
+<style>
+  :root { --bg:#f5f6f8; --card:#fff; --text:#1c1e21; --muted:#6b7280; --accent:#2563eb; --me:#2563eb; --me-text:#fff; --other:#e5e7eb; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#111827; --card:#1f2937; --text:#f3f4f6; --muted:#9ca3af; --accent:#3b82f6; --me:#3b82f6; --me-text:#fff; --other:#374151; }
+  }
+  * { box-sizing:border-box; }
+  html, body { height:100%; margin:0; }
+  body { font-family:system-ui,-apple-system,sans-serif; background:var(--bg); color:var(--text); }
+  .screen { display:none; height:100%; }
+  .screen.active { display:flex; }
+  #login { align-items:center; justify-content:center; padding:16px; }
+  .card { background:var(--card); padding:24px; border-radius:16px; width:100%; max-width:380px; box-shadow:0 4px 20px rgba(0,0,0,.1); }
+  h1 { margin:0 0 4px; font-size:22px; }
+  p.sub { margin:0 0 16px; color:var(--muted); font-size:14px; }
+  input { width:100%; padding:12px; margin-bottom:12px; border:1px solid var(--other); border-radius:10px; font-size:16px; background:var(--bg); color:var(--text); }
+  button { padding:12px 16px; border:0; border-radius:10px; background:var(--accent); color:#fff; font-size:16px; cursor:pointer; }
+  button.full { width:100%; }
+  #err { color:#dc2626; font-size:14px; min-height:20px; margin-top:8px; }
+  #chat { flex-direction:column; }
+  header { padding:12px 16px; background:var(--card); display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--other); }
+  header b { font-size:16px; }
+  header small { display:block; color:var(--muted); font-size:12px; }
+  header button { padding:8px 12px; font-size:14px; background:#dc2626; }
+  #msgs { flex:1; overflow-y:auto; padding:12px; display:flex; flex-direction:column; gap:8px; }
+  .m { max-width:80%; padding:8px 12px; border-radius:14px; background:var(--other); word-wrap:break-word; white-space:pre-wrap; }
+  .m .n { font-size:12px; color:var(--muted); margin-bottom:2px; }
+  .m.me { align-self:flex-end; background:var(--me); color:var(--me-text); }
+  .m.sys { align-self:center; background:none; color:var(--muted); font-size:13px; }
+  form { display:flex; gap:8px; padding:10px; background:var(--card); border-top:1px solid var(--other); padding-bottom:calc(10px + env(safe-area-inset-bottom, 0px)); }
+  form input { margin:0; flex:1; }
+</style>
+</head>
+<body>
+
+<div id="login" class="screen active">
+  <div class="card">
+    <h1>💬 Chat Ruangan</h1>
+    <p class="sub">Masukkan nama dan kode ruangan. Bagikan kode yang sama ke temanmu.</p>
+    <input id="name" placeholder="Nama kamu" maxlength="20" autocomplete="off">
+    <input id="code" placeholder="Kode ruangan (mis. kopi123)" maxlength="20" autocomplete="off">
+    <button class="full" id="joinBtn">Masuk</button>
+    <div id="err"></div>
+  </div>
+</div>
+
+<div id="chat" class="screen">
+  <header>
+    <div><b id="roomTitle"></b><small id="status"></small></div>
+    <button id="leaveBtn">Keluar</button>
+  </header>
+  <div id="msgs"></div>
+  <form id="form">
+    <input id="text" placeholder="Ketik pesan..." autocomplete="off">
+    <button type="submit">Kirim</button>
+  </form>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+let peer = null, isHost = false, myName = '', roomCode = '', hostConn = null;
+let clients = [];
+
+function show(id) {
+  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+  $(id).classList.add('active');
+}
+
+function addMsg(m) {
+  const d = document.createElement('div');
+  if (m.type === 'sys') {
+    d.className = 'm sys';
+    d.textContent = m.text;
+  } else {
+    d.className = 'm' + (m.name === myName && m.me ? ' me' : '');
+    if (!d.classList.contains('me')) {
+      const n = document.createElement('div');
+      n.className = 'n';
+      n.textContent = m.name;
+      d.appendChild(n);
+    }
+    const t = document.createElement('div');
+    t.textContent = m.text;
+    d.appendChild(t);
+  }
+  $('msgs').appendChild(d);
+  $('msgs').scrollTop = $('msgs').scrollHeight;
+}
+
+function relay(data, except) {
+  clients.forEach(c => { if (c !== except && c.open) c.send(data); });
+}
+
+function enterChat() {
+  $('roomTitle').textContent = 'Ruangan: ' + roomCode;
+  $('msgs').innerHTML = '';
+  show('chat');
+}
+
+function startHost(hostId) {
+  isHost = true;
+  $('status').textContent = 'Kamu host ruangan ini';
+  enterChat();
+  addMsg({ type: 'sys', text: 'Ruangan dibuat. Bagikan kode "' + roomCode + '" ke temanmu.' });
+  peer.on('connection', conn => {
+    clients.push(conn);
+    conn.on('data', data => {
+      addMsg(data);
+      relay(data, conn);
+    });
+    conn.on('close', () => {
+      clients = clients.filter(c => c !== conn);
+      const s = { type: 'sys', text: 'Seseorang keluar' };
+      addMsg(s); relay(s);
+    });
+  });
+}
+
+function startClient(hostId) {
+  peer.destroy();
+  peer = new Peer();
+  peer.on('open', () => {
+    hostConn = peer.connect(hostId, { reliable: true });
+    hostConn.on('open', () => {
+      $('status').textContent = 'Terhubung';
+      enterChat();
+      const s = { type: 'sys', text: myName + ' bergabung' };
+      addMsg(s); hostConn.send(s);
+    });
+    hostConn.on('data', data => addMsg(data));
+    hostConn.on('close', () => {
+      addMsg({ type: 'sys', text: 'Host terputus. Ruangan ditutup.' });
+      $('status').textContent = 'Terputus';
+    });
+  });
+  peer.on('error', e => fail('Gagal terhubung: ' + e.type));
+}
+
+function fail(msg) {
+  $('err').textContent = msg;
+  show('login');
+}
+
+function join() {
+  myName = $('name').value.trim();
+  roomCode = $('code').value.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (!myName || !roomCode) { $('err').textContent = 'Isi nama dan kode ruangan.'; return; }
+  $('err').textContent = 'Menghubungkan...';
+  const hostId = 'roomchat-v1-' + roomCode;
+  peer = new Peer(hostId);
+  peer.on('open', () => { $('err').textContent = ''; startHost(hostId); });
+  peer.on('error', e => {
+    if (e.type === 'unavailable-id') startClient(hostId);
+    else fail('Error: ' + e.type);
+  });
+}
+
+function leave() {
+  if (peer) peer.destroy();
+  peer = null; clients = []; hostConn = null; isHost = false;
+  show('login');
+}
+
+$('joinBtn').onclick = join;
+$('code').addEventListener('keydown', e => { if (e.key === 'Enter') join(); });
+$('leaveBtn').onclick = leave;
+$('form').addEventListener('submit', e => {
+  e.preventDefault();
+  const text = $('text').value.trim();
+  if (!text) return;
+  const data = { type: 'msg', name: myName, text };
+  addMsg({ ...data, me: true });
+  if (isHost) relay(data);
+  else if (hostConn && hostConn.open) hostConn.send(data);
+  $('text').value = '';
+});
+</script>
+</body>
+</html>
